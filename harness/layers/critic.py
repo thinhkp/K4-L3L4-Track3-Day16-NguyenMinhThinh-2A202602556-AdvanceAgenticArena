@@ -91,4 +91,72 @@ class Critic(Middleware):
         #     claims = [], citations = [], và viết lại "answer" nói rõ là
         #     không đủ căn cứ.
         #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list) or not claims:
+            return report
+
+        kept = []
+        split_claim = False
+        docs = getattr(ctx.corpus, "docs", ()) if ctx.corpus is not None else ()
+        for claim in claims:
+            if not isinstance(claim, dict) or not isinstance(claim.get("text"), str):
+                continue
+            text = claim["text"]
+            if ctx.saw(text):
+                kept.append(claim)
+                continue
+
+            split = None
+            start = 0
+            while True:
+                index = text.find(" và ", start)
+                if index < 0:
+                    break
+                left, right = text[:index], text[index + len(" và "):]
+                if left and right and ctx.saw(left) and ctx.saw(right):
+                    left_docs = [
+                        doc for doc in docs
+                        if any(left in line for line in doc.body.splitlines())
+                    ]
+                    right_docs = [
+                        doc for doc in docs
+                        if any(right in line for line in doc.body.splitlines())
+                    ]
+                    pair = next(
+                        ((a, b) for a in left_docs for b in right_docs
+                         if a.doc_id != b.doc_id),
+                        None,
+                    )
+                    if pair is not None:
+                        split = (left, right, pair[0].doc_id, pair[1].doc_id)
+                        break
+                # Advance one character so overlapping separators are
+                # considered too (a source span may itself end in "và").
+                start = index + 1
+
+            if split is not None:
+                left, right, left_id, right_id = split
+                kept.extend(
+                    [
+                        {**claim, "text": left, "doc_id": left_id},
+                        {**claim, "text": right, "doc_id": right_id},
+                    ]
+                )
+                split_claim = True
+
+        report["claims"] = kept
+        if split_claim:
+            report["abstain"] = True
+        if not kept:
+            report["abstain"] = True
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ trong tài liệu đã quan sát để trả lời chắc chắn."
+        else:
+            report["citations"] = sorted(
+                {
+                    claim["doc_id"]
+                    for claim in kept
+                    if isinstance(claim.get("doc_id"), str) and claim["doc_id"]
+                }
+            )
+        return report
